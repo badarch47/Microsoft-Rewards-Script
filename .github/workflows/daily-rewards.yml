@@ -66,8 +66,8 @@ jobs:
 
             # The ubuntu runner image already ships the shared libraries Chromium needs,
             # so `--with-deps` (a large apt install on every run) is unnecessary here.
+            # The command stays idempotent: it exits immediately when the cache already has the browser.
             - name: Install headless Chromium
-              if: steps.chromium-cache.outputs.cache-hit != 'true'
               timeout-minutes: 8
               run: npx patchright install --only-shell chromium
 
