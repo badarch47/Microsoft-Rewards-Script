@@ -19,6 +19,8 @@ env:
     # so `npm ci` never wipes them and actions/cache can reuse them.
     PLAYWRIGHT_BROWSERS_PATH: /home/runner/.cache/patchright
     NODE_OPTIONS: --disable-warning=ExperimentalWarning
+    # Capture HTML + screenshot of unrecognised login pages so failures are diagnosable.
+    CONFIG_ERROR_DIAGNOSTICS: 'true'
 
 jobs:
     collect-daily-points:
@@ -87,6 +89,33 @@ jobs:
                   cp config.example.json config.json
                   node dist/util/ConfigEnvOverrides.js apply --config config.json
 
+            # Reusing a signed-in session avoids Microsoft's "verify your identity"
+            # challenge, which a fresh runner IP triggers on almost every run.
+            - name: Restore saved login session
+              uses: actions/cache@v4
+              with:
+                  path: sessions
+                  key: sessions-${{ github.run_id }}
+                  restore-keys: |
+                      sessions-
+
+            - name: Seed login session from secret
+              shell: bash
+              env:
+                  REWARDS_SESSION_DB_B64: ${{ secrets.REWARDS_SESSION_DB_B64 }}
+              run: |
+                  if [[ -z "${REWARDS_SESSION_DB_B64:-}" ]]; then
+                    echo "REWARDS_SESSION_DB_B64 is not set; this run will sign in from scratch."
+                    exit 0
+                  fi
+                  if [[ -f sessions/sessions.db ]]; then
+                    echo "A cached session database already exists; keeping the newer cached copy."
+                    exit 0
+                  fi
+                  mkdir -p sessions
+                  printf '%s' "$REWARDS_SESSION_DB_B64" | base64 -d > sessions/sessions.db
+                  echo "Login session restored from the REWARDS_SESSION_DB_B64 secret."
+
             - name: Run daily Microsoft Rewards tasks
               id: rewards
               env:
@@ -100,3 +129,14 @@ jobs:
                   REWARDS_OUTCOME: ${{ steps.rewards.outcome || 'failure' }}
                   REWARDS_LOG_FILE: rewards-run.log
               run: node scripts/github/notify-wecom.js
+
+            - name: Upload failure diagnostics
+              if: failure()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: rewards-diagnostics
+                  path: |
+                      diagnostics/
+                      rewards-run.log
+                  if-no-files-found: ignore
+                  retention-days: 7
