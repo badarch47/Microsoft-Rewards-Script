@@ -114,9 +114,25 @@ npm run start
 3. 可选：打开 **Variables** 标签页，设置 `ACCOUNT_1_GEO_LOCALE`（例如 `CN`）和 `ACCOUNT_1_LANG_CODE`（例如 `zh-CN`）。留空则使用脚本默认值。
 4. 打开 **Actions**，按提示启用工作流，选择 **Daily Microsoft Rewards**，点击 **Run workflow** 测试配置。
 
-工作流会校验邮箱是否已配置，安装 Node.js 24 和无头 Chromium，生成 `config.json`，并以实时输出的方式运行脚本。每次运行都会在 Actions 页面追加一份结果摘要，包含处理的账号数量、获得的积分、当前余额，以及失败时提取的错误摘要。由于脚本在报告账号级失败（例如登录被拒）时仍会以退出码 0 结束，工作流的包装逻辑会检查输出并在这种情况下将作业标记为失败，避免出错的运行显示为绿色。捕获的输出中会对账号邮箱、用户名、密码、TOTP 密钥和代理凭据做脱敏处理，因为公开仓库的日志可能被公众访问。如果配置了 `WECOM_WEBHOOK_URL`，工作流会向企业微信群机器人发送成功或失败通知；未配置时则跳过通知，不影响 Rewards 任务的执行。
+工作流会校验邮箱是否已配置，安装 Node.js 24 和无头 Chromium（下载到 `~/.cache/patchright` 并通过 `actions/cache` 复用；安装时故意不加 `--with-deps`，因为 Runner 镜像已自带所需系统库，这样可以省掉每次运行数分钟的 apt 安装），生成 `config.json`，并以实时输出的方式运行脚本。每次运行都会在 Actions 页面追加一份结果摘要，包含处理的账号数量、获得的积分、当前余额，以及失败时提取的错误摘要。由于脚本在报告账号级失败（例如登录被拒）时仍会以退出码 0 结束，工作流的包装逻辑会检查输出并在这种情况下将作业标记为失败，避免出错的运行显示为绿色。捕获的输出中会对账号邮箱、用户名、密码、TOTP 密钥和代理凭据做脱敏处理，因为公开仓库的日志可能被公众访问。如果配置了 `WECOM_WEBHOOK_URL`，工作流会向企业微信群机器人发送成功或失败通知；未配置时则跳过通知，不影响 Rewards 任务的执行。
 
 凭据从 GitHub Secrets 读取，不会提交到仓库。当 GitHub 托管的 Runner 繁忙时，定时运行可能晚于设定时间启动。完全的无人值守执行还取决于 Microsoft 是否要求验证码或其他交互式登录验证。
+
+### 在 CI Runner 上登录
+
+`account.live.com/identity/confirm` 是 Microsoft 的「验证你的身份」页面。GitHub 托管的 Runner 每次运行都会换一个 IP，正好命中这个风控条件，而该页面要求输入发送到备用邮箱或手机的验证码——无人值守脚本无法回答。工作流现在会识别这一页面：把页面标题和可见操作写入日志，把 HTML 与截图作为 `rewards-diagnostics` 制品上传，并在约 40 秒内明确失败，而不是空转到超时。
+
+真正能长期无人值守的做法是复用一次已登录的会话：
+
+1. 在本地保持 `config.json` 中 `"headless": false`，带上账号凭据运行 `npm run start`。
+2. 在可见的浏览器窗口中手动完成身份验证，脚本会把会话写入 `sessions/sessions.db`。
+3. 把该数据库编码后存为仓库 Secret `REWARDS_SESSION_DB_B64`：
+    ```bash
+    base64 -w0 sessions/sessions.db
+    ```
+4. 工作流会在每次运行前恢复该会话，并在运行结束后缓存更新过的数据库，之后的运行即可跳过登录页。
+
+会话文件等同于凭据：只放在 Secrets 中，不要提交进仓库；能读取该 Secret 或 Actions 缓存的人都可以用这个账号行事。
 
 ## Docker
 
@@ -195,61 +211,61 @@ curl --request POST \
 
 ### 核心（Core）
 
-| 配置项 | 类型 | 默认值 | 说明 | Docker 环境变量 |
-| --- | --- | --- | --- | --- |
-| `sessionPath` | string | `"sessions"` | 存放浏览器会话的目录 | |
-| `headless` | boolean | `false` | 以无界面方式运行浏览器 | Docker 中始终为 `true` |
-| `clusters` | number | `1` | 并发运行的账号集群数量 | `CONFIG_CLUSTERS` |
-| `errorDiagnostics` | boolean | `false` | 将错误页面和未知登录页面的诊断信息保存到 `diagnostics/` | `CONFIG_ERROR_DIAGNOSTICS` |
-| `ensureStreakProtection` | boolean | `true` | 确保已开启连续打卡保护（streak protection） | `CONFIG_ENSURE_STREAK_PROTECTION` |
-| `autoClaimPunchcardRewards` | boolean | `false` | 自动领取已完成的打卡任务奖励 | `CONFIG_AUTO_CLAIM_PUNCHCARD_REWARDS` |
-| `contintueOnBotWarning` | boolean | `false` | 忽略 Microsoft 的机器人评分警告继续执行（不推荐） | `CONFIG_CONTINTUE_ON_BOT_WARNING` |
-| `skipNonPointTasks` | boolean | `true` | 跳过不给积分的任务 | `CONFIG_SKIP_NON_POINT_TASKS` |
-| `accountDelay.min` | string | `"1min"` | 开始下一个已配置账号前的最小延迟 | `CONFIG_ACCOUNT_DELAY_MIN` |
-| `accountDelay.max` | string | `"3min"` | 开始下一个已配置账号前的最大延迟 | `CONFIG_ACCOUNT_DELAY_MAX` |
-| `searchOnBingLocalQueries` | boolean | `false` | ExploreOnBing 使用本地查询词列表 | `CONFIG_SEARCH_ON_BING_LOCAL` |
-| `globalTimeout` | string | `"30sec"` | 所有操作的超时时间 | `CONFIG_GLOBAL_TIMEOUT` |
+| 配置项                      | 类型    | 默认值       | 说明                                                    | Docker 环境变量                       |
+| --------------------------- | ------- | ------------ | ------------------------------------------------------- | ------------------------------------- |
+| `sessionPath`               | string  | `"sessions"` | 存放浏览器会话的目录                                    |                                       |
+| `headless`                  | boolean | `false`      | 以无界面方式运行浏览器                                  | Docker 中始终为 `true`                |
+| `clusters`                  | number  | `1`          | 并发运行的账号集群数量                                  | `CONFIG_CLUSTERS`                     |
+| `errorDiagnostics`          | boolean | `false`      | 将错误页面和未知登录页面的诊断信息保存到 `diagnostics/` | `CONFIG_ERROR_DIAGNOSTICS`            |
+| `ensureStreakProtection`    | boolean | `true`       | 确保已开启连续打卡保护（streak protection）             | `CONFIG_ENSURE_STREAK_PROTECTION`     |
+| `autoClaimPunchcardRewards` | boolean | `false`      | 自动领取已完成的打卡任务奖励                            | `CONFIG_AUTO_CLAIM_PUNCHCARD_REWARDS` |
+| `contintueOnBotWarning`     | boolean | `false`      | 忽略 Microsoft 的机器人评分警告继续执行（不推荐）       | `CONFIG_CONTINTUE_ON_BOT_WARNING`     |
+| `skipNonPointTasks`         | boolean | `true`       | 跳过不给积分的任务                                      | `CONFIG_SKIP_NON_POINT_TASKS`         |
+| `accountDelay.min`          | string  | `"1min"`     | 开始下一个已配置账号前的最小延迟                        | `CONFIG_ACCOUNT_DELAY_MIN`            |
+| `accountDelay.max`          | string  | `"3min"`     | 开始下一个已配置账号前的最大延迟                        | `CONFIG_ACCOUNT_DELAY_MAX`            |
+| `searchOnBingLocalQueries`  | boolean | `false`      | ExploreOnBing 使用本地查询词列表                        | `CONFIG_SEARCH_ON_BING_LOCAL`         |
+| `globalTimeout`             | string  | `"30sec"`    | 所有操作的超时时间                                      | `CONFIG_GLOBAL_TIMEOUT`               |
 
 ### 任务执行器（Workers）
 
-| 配置项 | 类型 | 默认值 | 说明 | Docker 环境变量 |
-| --- | --- | --- | --- | --- |
-| `workers.doDailySet` | boolean | `true` | 完成每日任务集（Daily Set） | `CONFIG_WORKER_DAILY_SET` |
-| `workers.doClaimBonusPoints` | boolean | `true` | 领取奖励积分 | `CONFIG_WORKER_CLAIM_BONUS_POINTS` |
-| `workers.doMorePromotions` | boolean | `true` | 完成"更多活动" | `CONFIG_WORKER_MORE_PROMOTIONS` |
-| `workers.doPunchCards` | boolean | `true` | 完成打卡任务（Punch Cards） | `CONFIG_WORKER_PUNCH_CARDS` |
-| `workers.doAppPromotions` | boolean | `true` | 完成 App 推广任务 | `CONFIG_WORKER_APP_PROMOTIONS` |
-| `workers.doDesktopSearch` | boolean | `true` | 执行桌面端搜索 | `CONFIG_WORKER_DESKTOP_SEARCH` |
-| `workers.doMobileSearch` | boolean | `true` | 执行移动端搜索 | `CONFIG_WORKER_MOBILE_SEARCH` |
-| `workers.doBonusSearches` | boolean | `false` | 超出上限后继续刷额外搜索 | `CONFIG_WORKER_BONUS_SEARCHES` |
-| `workers.doDailyCheckIn` | boolean | `true` | 完成每日签到 | `CONFIG_WORKER_DAILY_CHECKIN` |
-| `workers.doReadToEarn` | boolean | `true` | 完成"阅读赚积分"（Read-to-Earn） | `CONFIG_WORKER_READ_TO_EARN` |
-| `workers.doActivateSearchPerk` | boolean | `true` | 存在时激活"再搜索 N 次"特权（在每日任务集之后运行） | `CONFIG_WORKER_ACTIVATE_SEARCH_PERK` |
-| `workers.doVisualSearch` | boolean | `false` | 激活视觉搜索连续记录并执行视觉搜索 | `CONFIG_WORKER_VISUAL_SEARCH` |
+| 配置项                         | 类型    | 默认值  | 说明                                                | Docker 环境变量                      |
+| ------------------------------ | ------- | ------- | --------------------------------------------------- | ------------------------------------ |
+| `workers.doDailySet`           | boolean | `true`  | 完成每日任务集（Daily Set）                         | `CONFIG_WORKER_DAILY_SET`            |
+| `workers.doClaimBonusPoints`   | boolean | `true`  | 领取奖励积分                                        | `CONFIG_WORKER_CLAIM_BONUS_POINTS`   |
+| `workers.doMorePromotions`     | boolean | `true`  | 完成"更多活动"                                      | `CONFIG_WORKER_MORE_PROMOTIONS`      |
+| `workers.doPunchCards`         | boolean | `true`  | 完成打卡任务（Punch Cards）                         | `CONFIG_WORKER_PUNCH_CARDS`          |
+| `workers.doAppPromotions`      | boolean | `true`  | 完成 App 推广任务                                   | `CONFIG_WORKER_APP_PROMOTIONS`       |
+| `workers.doDesktopSearch`      | boolean | `true`  | 执行桌面端搜索                                      | `CONFIG_WORKER_DESKTOP_SEARCH`       |
+| `workers.doMobileSearch`       | boolean | `true`  | 执行移动端搜索                                      | `CONFIG_WORKER_MOBILE_SEARCH`        |
+| `workers.doBonusSearches`      | boolean | `false` | 超出上限后继续刷额外搜索                            | `CONFIG_WORKER_BONUS_SEARCHES`       |
+| `workers.doDailyCheckIn`       | boolean | `true`  | 完成每日签到                                        | `CONFIG_WORKER_DAILY_CHECKIN`        |
+| `workers.doReadToEarn`         | boolean | `true`  | 完成"阅读赚积分"（Read-to-Earn）                    | `CONFIG_WORKER_READ_TO_EARN`         |
+| `workers.doActivateSearchPerk` | boolean | `true`  | 存在时激活"再搜索 N 次"特权（在每日任务集之后运行） | `CONFIG_WORKER_ACTIVATE_SEARCH_PERK` |
+| `workers.doVisualSearch`       | boolean | `false` | 激活视觉搜索连续记录并执行视觉搜索                  | `CONFIG_WORKER_VISUAL_SEARCH`        |
 
 ### 活动（Activities）
 
-| 配置项 | 类型 | 默认值 | 说明 | Docker 环境变量 |
-| --- | --- | --- | --- | --- |
-| `activities.urlReward` | boolean | `true` | 完成 URL 奖励类活动 | `CONFIG_ACTIVITY_URL_REWARD` |
+| 配置项                    | 类型    | 默认值 | 说明                      | Docker 环境变量                  |
+| ------------------------- | ------- | ------ | ------------------------- | -------------------------------- |
+| `activities.urlReward`    | boolean | `true` | 完成 URL 奖励类活动       | `CONFIG_ACTIVITY_URL_REWARD`     |
 | `activities.searchOnBing` | boolean | `true` | 完成 ExploreOnBing 类活动 | `CONFIG_ACTIVITY_SEARCH_ON_BING` |
 
 ### 搜索设置（Search Settings）
 
-| 配置项 | 类型 | 默认值 | 说明 | Docker 环境变量 |
-| --- | --- | --- | --- | --- |
-| `searchSettings.scrollRandomResults` | boolean | `false` | 在搜索结果页随机滚动 | `CONFIG_SEARCH_SCROLL_RANDOM` |
-| `searchSettings.clickRandomResults` | boolean | `false` | 随机点击链接 | `CONFIG_SEARCH_CLICK_RANDOM` |
-| `searchSettings.runOnZeroPoints` | boolean | `false` | 即使搜索积分已用完也继续搜索 | `CONFIG_SEARCH_RUN_ON_ZERO_POINTS` |
-| `searchSettings.maxBonusSearches` | number | `110` | 单次运行的额外搜索上限（开启 `doBonusSearches` 时生效） | `CONFIG_SEARCH_MAX_BONUS_SEARCHES` |
-| `searchSettings.parallelSearching` | boolean | `true` | 并行执行搜索 | `CONFIG_SEARCH_PARALLEL` |
-| `searchSettings.clusterSearch` | boolean | `true` | 用 Bing 联想词为每个主题构建搜索簇 | `CONFIG_SEARCH_CLUSTER` |
-| `searchSettings.queryEngines` | string[] | 见[查询词来源](#查询词来源) | 用于构建搜索词池的来源 | `CONFIG_SEARCH_QUERY_ENGINES` \* |
-| `searchSettings.searchResultVisitTime` | string | `"10sec"` | 在每个搜索结果页停留的时间 | `CONFIG_SEARCH_VISIT_TIME` |
-| `searchSettings.searchDelay.min` | string | `"30sec"` | 两次搜索之间的最小延迟 | `CONFIG_SEARCH_DELAY_MIN` |
-| `searchSettings.searchDelay.max` | string | `"1min"` | 两次搜索之间的最大延迟 | `CONFIG_SEARCH_DELAY_MAX` |
-| `searchSettings.readDelay.min` | string | `"30sec"` | 阅读内容的最小延迟 | `CONFIG_SEARCH_READ_DELAY_MIN` |
-| `searchSettings.readDelay.max` | string | `"1min"` | 阅读内容的最大延迟 | `CONFIG_SEARCH_READ_DELAY_MAX` |
+| 配置项                                 | 类型     | 默认值                      | 说明                                                    | Docker 环境变量                    |
+| -------------------------------------- | -------- | --------------------------- | ------------------------------------------------------- | ---------------------------------- |
+| `searchSettings.scrollRandomResults`   | boolean  | `false`                     | 在搜索结果页随机滚动                                    | `CONFIG_SEARCH_SCROLL_RANDOM`      |
+| `searchSettings.clickRandomResults`    | boolean  | `false`                     | 随机点击链接                                            | `CONFIG_SEARCH_CLICK_RANDOM`       |
+| `searchSettings.runOnZeroPoints`       | boolean  | `false`                     | 即使搜索积分已用完也继续搜索                            | `CONFIG_SEARCH_RUN_ON_ZERO_POINTS` |
+| `searchSettings.maxBonusSearches`      | number   | `110`                       | 单次运行的额外搜索上限（开启 `doBonusSearches` 时生效） | `CONFIG_SEARCH_MAX_BONUS_SEARCHES` |
+| `searchSettings.parallelSearching`     | boolean  | `true`                      | 并行执行搜索                                            | `CONFIG_SEARCH_PARALLEL`           |
+| `searchSettings.clusterSearch`         | boolean  | `true`                      | 用 Bing 联想词为每个主题构建搜索簇                      | `CONFIG_SEARCH_CLUSTER`            |
+| `searchSettings.queryEngines`          | string[] | 见[查询词来源](#查询词来源) | 用于构建搜索词池的来源                                  | `CONFIG_SEARCH_QUERY_ENGINES` \*   |
+| `searchSettings.searchResultVisitTime` | string   | `"10sec"`                   | 在每个搜索结果页停留的时间                              | `CONFIG_SEARCH_VISIT_TIME`         |
+| `searchSettings.searchDelay.min`       | string   | `"30sec"`                   | 两次搜索之间的最小延迟                                  | `CONFIG_SEARCH_DELAY_MIN`          |
+| `searchSettings.searchDelay.max`       | string   | `"1min"`                    | 两次搜索之间的最大延迟                                  | `CONFIG_SEARCH_DELAY_MAX`          |
+| `searchSettings.readDelay.min`         | string   | `"30sec"`                   | 阅读内容的最小延迟                                      | `CONFIG_SEARCH_READ_DELAY_MIN`     |
+| `searchSettings.readDelay.max`         | string   | `"1min"`                    | 阅读内容的最大延迟                                      | `CONFIG_SEARCH_READ_DELAY_MAX`     |
 
 桌面端和移动端的搜索配额独立于仪表盘计数器单独跟踪。所有 `mobileSearch` 条目合并计算移动端配额，所有 `pcSearch` 条目合并计算桌面端配额；明确标识为 Edge 的计数器也会单独展示以便诊断。脚本只跳过已完成的平台，因此移动端配额已完成（`60/60`）不会阻止尚未完成的桌面端配额继续运行。启用 `parallelSearching` 后，两个未完成的配额可以在各自的浏览器上下文中并发执行。
 
@@ -262,42 +278,42 @@ curl --request POST \
 
 核心来源：
 
-| 选项 | 来源 |
-| --- | --- |
-| `google` | Google Trends（热门搜索） |
-| `wikipedia` | 维基百科最多阅读文章（前一日） |
-| `wikirandom` | 随机维基百科文章 |
-| `hackernews` | Hacker News 首页文章 |
-| `reddit` | Reddit r/popular 帖子标题 |
-| `local` | 内置的 `src/functions/search-queries.json` 列表 |
+| 选项         | 来源                                            |
+| ------------ | ----------------------------------------------- |
+| `google`     | Google Trends（热门搜索）                       |
+| `wikipedia`  | 维基百科最多阅读文章（前一日）                  |
+| `wikirandom` | 随机维基百科文章                                |
+| `hackernews` | Hacker News 首页文章                            |
+| `reddit`     | Reddit r/popular 帖子标题                       |
+| `local`      | 内置的 `src/functions/search-queries.json` 列表 |
 
 RSS 源使用点号路径——`rss` 表示全部源，`rss.<site>` 表示整个站点，`rss.<site>.<endpoint>` 表示单个订阅源：
 
-| 选项 | 订阅源 |
-| --- | --- |
-| `rss.googleTrends` | Google Trends RSS（`gb`、`us`） |
-| `rss.googleNews` | Google News（`gb`、`us`、`world`、`technology`、`business`） |
-| `rss.bbc` | BBC News（`top`、`world`、`technology`、`business`、`science`） |
-| `rss.guardian` | The Guardian（`international`、`world`、`technology`） |
-| `rss.theVerge` | The Verge（`all`） |
-| `rss.arsTechnica` | Ars Technica（`all`） |
-| `rss.reddit` | Reddit 列表订阅源（`popular`、`worldnews`、`technology`） |
+| 选项               | 订阅源                                                          |
+| ------------------ | --------------------------------------------------------------- |
+| `rss.googleTrends` | Google Trends RSS（`gb`、`us`）                                 |
+| `rss.googleNews`   | Google News（`gb`、`us`、`world`、`technology`、`business`）    |
+| `rss.bbc`          | BBC News（`top`、`world`、`technology`、`business`、`science`） |
+| `rss.guardian`     | The Guardian（`international`、`world`、`technology`）          |
+| `rss.theVerge`     | The Verge（`all`）                                              |
+| `rss.arsTechnica`  | Ars Technica（`all`）                                           |
+| `rss.reddit`       | Reddit 列表订阅源（`popular`、`worldnews`、`technology`）       |
 
 在 `src/constants/rssFeeds.ts` 中添加你自己的订阅源。默认值：
 
 ```json
 [
-  "google",
-  "wikipedia",
-  "wikirandom",
-  "hackernews",
-  "reddit",
-  "local",
-  "rss.googleTrends",
-  "rss.googleNews",
-  "rss.bbc",
-  "rss.guardian.world",
-  "rss.theVerge.all"
+    "google",
+    "wikipedia",
+    "wikirandom",
+    "hackernews",
+    "reddit",
+    "local",
+    "rss.googleTrends",
+    "rss.googleNews",
+    "rss.bbc",
+    "rss.guardian.world",
+    "rss.theVerge.all"
 ]
 ```
 
@@ -305,12 +321,12 @@ RSS 源使用点号路径——`rss` 表示全部源，`rss.<site>` 表示整个
 
 需手动开启的功能，可能随时变动。默认全部关闭。
 
-| 配置项 | 类型 | 默认值 | 说明 | Docker 环境变量 |
-| --- | --- | --- | --- | --- |
-| `experimental.apiSearch` | boolean | `false` | 通过 HTTP 执行 Bing 搜索，而不是驱动浏览器页面 | `CONFIG_EXPERIMENTAL_API_SEARCH` |
-| `experimental.apiSearchOnBing` | boolean | `false` | 通过 HTTP 完成 ExploreOnBing 活动，而不使用浏览器 | `CONFIG_EXPERIMENTAL_API_SEARCH_ON_BING` |
-| `experimental.blockMedia` | boolean | `false` | 登录后拦截浏览器的 `image` 和 `media` 请求以减少流量 | `CONFIG_EXPERIMENTAL_BLOCK_MEDIA` |
-| `experimental.edgeBrowsing` | boolean | `false` | 将 30 分钟的 Edge 浏览活动作为后台 HTTP 任务上报 | `CONFIG_EXPERIMENTAL_EDGE_BROWSING` |
+| 配置项                         | 类型    | 默认值  | 说明                                                 | Docker 环境变量                          |
+| ------------------------------ | ------- | ------- | ---------------------------------------------------- | ---------------------------------------- |
+| `experimental.apiSearch`       | boolean | `false` | 通过 HTTP 执行 Bing 搜索，而不是驱动浏览器页面       | `CONFIG_EXPERIMENTAL_API_SEARCH`         |
+| `experimental.apiSearchOnBing` | boolean | `false` | 通过 HTTP 完成 ExploreOnBing 活动，而不使用浏览器    | `CONFIG_EXPERIMENTAL_API_SEARCH_ON_BING` |
+| `experimental.blockMedia`      | boolean | `false` | 登录后拦截浏览器的 `image` 和 `media` 请求以减少流量 | `CONFIG_EXPERIMENTAL_BLOCK_MEDIA`        |
+| `experimental.edgeBrowsing`    | boolean | `false` | 将 30 分钟的 Edge 浏览活动作为后台 HTTP 任务上报     | `CONFIG_EXPERIMENTAL_EDGE_BROWSING`      |
 
 启用 `experimental.blockMedia` 后，自动化流程只在验证通过身份认证且会话已保存之后才会激活它。手动登录流程全程保持媒体加载开启；`npm run open-session` 仍会立即应用配置的拦截规则，因为它打开的是已保存的会话。
 
@@ -337,23 +353,23 @@ RSS 源使用点号路径——`rss` 表示全部源，`rss.<site>` 表示整个
 
 ### 日志（Logging）
 
-| 配置项 | 类型 | 默认值 | 说明 | Docker 环境变量 |
-| --- | --- | --- | --- | --- |
-| `debugLogs` | boolean | `false` | 启用调试日志 | `CONFIG_DEBUG_LOGS` |
-| `consoleLogFilter.enabled` | boolean | `false` | 启用控制台日志过滤 | `CONFIG_LOG_FILTER_ENABLED` |
-| `consoleLogFilter.mode` | string | `"whitelist"` | 过滤模式（whitelist 白名单 / blacklist 黑名单） | `CONFIG_LOG_FILTER_MODE` |
-| `consoleLogFilter.levels` | string[] | `["error", "warn"]` | 需要过滤的日志级别 | `CONFIG_LOG_FILTER_LEVELS` \* |
-| `consoleLogFilter.keywords` | string[] | `["starting account"]` | 需要过滤的关键词 | `CONFIG_LOG_FILTER_KEYWORDS` \* |
-| `consoleLogFilter.regexPatterns` | string[] | `[]` | 用于过滤的正则表达式 | |
+| 配置项                           | 类型     | 默认值                 | 说明                                            | Docker 环境变量                 |
+| -------------------------------- | -------- | ---------------------- | ----------------------------------------------- | ------------------------------- |
+| `debugLogs`                      | boolean  | `false`                | 启用调试日志                                    | `CONFIG_DEBUG_LOGS`             |
+| `consoleLogFilter.enabled`       | boolean  | `false`                | 启用控制台日志过滤                              | `CONFIG_LOG_FILTER_ENABLED`     |
+| `consoleLogFilter.mode`          | string   | `"whitelist"`          | 过滤模式（whitelist 白名单 / blacklist 黑名单） | `CONFIG_LOG_FILTER_MODE`        |
+| `consoleLogFilter.levels`        | string[] | `["error", "warn"]`    | 需要过滤的日志级别                              | `CONFIG_LOG_FILTER_LEVELS` \*   |
+| `consoleLogFilter.keywords`      | string[] | `["starting account"]` | 需要过滤的关键词                                | `CONFIG_LOG_FILTER_KEYWORDS` \* |
+| `consoleLogFilter.regexPatterns` | string[] | `[]`                   | 用于过滤的正则表达式                            |                                 |
 
 > [!NOTE]
 > \* Docker 的 `CONFIG_*` 数组值使用逗号分隔的字符串，例如 `"error,warn"`。正则表达式必须直接写在 `config.json` 中。
 
 ### 代理（Proxy）
 
-| 配置项 | 类型 | 默认值 | 说明 | Docker 环境变量 |
-| --- | --- | --- | --- | --- |
-| `proxy.queryEngine` | boolean | `true` | 为查询词来源请求使用代理 | `CONFIG_PROXY_QUERY_ENGINE` |
+| 配置项                          | 类型    | 默认值  | 说明                                  | Docker 环境变量                          |
+| ------------------------------- | ------- | ------- | ------------------------------------- | ---------------------------------------- |
+| `proxy.queryEngine`             | boolean | `true`  | 为查询词来源请求使用代理              | `CONFIG_PROXY_QUERY_ENGINE`              |
 | `proxy.ignoreCertificateErrors` | boolean | `false` | 为拦截型代理关闭浏览器的 TLS 证书校验 | `CONFIG_PROXY_IGNORE_CERTIFICATE_ERRORS` |
 
 普通 HTTP(S)/SOCKS 代理请保持 `proxy.ignoreCertificateErrors` 关闭。启用它会削弱整个浏览器上下文的 TLS 保护，只有在受信任的拦截型代理确实无法出示有效证书时才应使用。
@@ -364,25 +380,25 @@ RSS 源使用点号路径——`rss` 表示全部源，`rss.<site>` 表示整个
 
 ### Webhook 通知
 
-| 配置项 | 类型 | 默认值 | 说明 | Docker 环境变量 |
-| --- | --- | --- | --- | --- |
-| `webhook.discord.enabled` | boolean | `false` | 启用 Discord Webhook | `CONFIG_DISCORD_ENABLED` |
-| `webhook.discord.url` | string | `""` | Discord Webhook 地址 | `CONFIG_DISCORD_URL` |
-| `webhook.telegram.enabled` | boolean | `false` | 启用 Telegram Webhook | `CONFIG_TELEGRAM_ENABLED` |
-| `webhook.telegram.botToken` | string | `""` | Telegram 机器人 Token | `CONFIG_TELEGRAM_BOTTOKEN` |
-| `webhook.telegram.chatId` | string | `""` | Telegram 会话 ID | `CONFIG_TELEGRAM_CHATID` |
-| `webhook.ntfy.enabled` | boolean | `false` | 启用 ntfy 通知 | `CONFIG_NTFY_ENABLED` |
-| `webhook.ntfy.url` | string | `""` | ntfy 服务器地址 | `CONFIG_NTFY_URL` |
-| `webhook.ntfy.topic` | string | `""` | ntfy 主题 | `CONFIG_NTFY_TOPIC` |
-| `webhook.ntfy.token` | string | `""` | ntfy 认证令牌 | `CONFIG_NTFY_TOKEN` |
-| `webhook.ntfy.title` | string | `"Microsoft-Rewards-Script"` | 通知标题 | `CONFIG_NTFY_TITLE` |
-| `webhook.ntfy.tags` | string[] | `["bot", "notify"]` | 通知标签 | `CONFIG_NTFY_TAGS` \* |
-| `webhook.ntfy.priority` | number | `3` | 通知优先级（1-5） | `CONFIG_NTFY_PRIORITY` |
-| `webhook.webhookLogFilter.enabled` | boolean | `false` | 启用 Webhook 日志过滤 | `CONFIG_WEBHOOK_LOG_FILTER_ENABLED` |
-| `webhook.webhookLogFilter.mode` | string | `"whitelist"` | 过滤模式（whitelist 白名单 / blacklist 黑名单） | `CONFIG_WEBHOOK_LOG_FILTER_MODE` |
-| `webhook.webhookLogFilter.levels` | string[] | `["error"]` | 需要发送的日志级别 | `CONFIG_WEBHOOK_LOG_FILTER_LEVELS` \* |
-| `webhook.webhookLogFilter.keywords` | string[] | `["starting account", "select number", "collected"]` | 需要过滤的关键词 | `CONFIG_WEBHOOK_LOG_FILTER_KEYWORDS` \* |
-| `webhook.webhookLogFilter.regexPatterns` | string[] | `[]` | 用于过滤的正则表达式 | |
+| 配置项                                   | 类型     | 默认值                                               | 说明                                            | Docker 环境变量                         |
+| ---------------------------------------- | -------- | ---------------------------------------------------- | ----------------------------------------------- | --------------------------------------- |
+| `webhook.discord.enabled`                | boolean  | `false`                                              | 启用 Discord Webhook                            | `CONFIG_DISCORD_ENABLED`                |
+| `webhook.discord.url`                    | string   | `""`                                                 | Discord Webhook 地址                            | `CONFIG_DISCORD_URL`                    |
+| `webhook.telegram.enabled`               | boolean  | `false`                                              | 启用 Telegram Webhook                           | `CONFIG_TELEGRAM_ENABLED`               |
+| `webhook.telegram.botToken`              | string   | `""`                                                 | Telegram 机器人 Token                           | `CONFIG_TELEGRAM_BOTTOKEN`              |
+| `webhook.telegram.chatId`                | string   | `""`                                                 | Telegram 会话 ID                                | `CONFIG_TELEGRAM_CHATID`                |
+| `webhook.ntfy.enabled`                   | boolean  | `false`                                              | 启用 ntfy 通知                                  | `CONFIG_NTFY_ENABLED`                   |
+| `webhook.ntfy.url`                       | string   | `""`                                                 | ntfy 服务器地址                                 | `CONFIG_NTFY_URL`                       |
+| `webhook.ntfy.topic`                     | string   | `""`                                                 | ntfy 主题                                       | `CONFIG_NTFY_TOPIC`                     |
+| `webhook.ntfy.token`                     | string   | `""`                                                 | ntfy 认证令牌                                   | `CONFIG_NTFY_TOKEN`                     |
+| `webhook.ntfy.title`                     | string   | `"Microsoft-Rewards-Script"`                         | 通知标题                                        | `CONFIG_NTFY_TITLE`                     |
+| `webhook.ntfy.tags`                      | string[] | `["bot", "notify"]`                                  | 通知标签                                        | `CONFIG_NTFY_TAGS` \*                   |
+| `webhook.ntfy.priority`                  | number   | `3`                                                  | 通知优先级（1-5）                               | `CONFIG_NTFY_PRIORITY`                  |
+| `webhook.webhookLogFilter.enabled`       | boolean  | `false`                                              | 启用 Webhook 日志过滤                           | `CONFIG_WEBHOOK_LOG_FILTER_ENABLED`     |
+| `webhook.webhookLogFilter.mode`          | string   | `"whitelist"`                                        | 过滤模式（whitelist 白名单 / blacklist 黑名单） | `CONFIG_WEBHOOK_LOG_FILTER_MODE`        |
+| `webhook.webhookLogFilter.levels`        | string[] | `["error"]`                                          | 需要发送的日志级别                              | `CONFIG_WEBHOOK_LOG_FILTER_LEVELS` \*   |
+| `webhook.webhookLogFilter.keywords`      | string[] | `["starting account", "select number", "collected"]` | 需要过滤的关键词                                | `CONFIG_WEBHOOK_LOG_FILTER_KEYWORDS` \* |
+| `webhook.webhookLogFilter.regexPatterns` | string[] | `[]`                                                 | 用于过滤的正则表达式                            |                                         |
 
 > [!NOTE]
 > \* Docker 的 `CONFIG_*` 数组值使用逗号分隔的字符串，例如 `"error,warn"`。正则表达式必须直接写在 `config.json` 中。
