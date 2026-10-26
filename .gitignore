@@ -1,4 +1,5 @@
 sessions/
+rewards-run.log
 dist/
 .dev/
 node_modules/

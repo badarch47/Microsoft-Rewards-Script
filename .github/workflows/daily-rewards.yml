@@ -1,0 +1,79 @@
+name: Daily Microsoft Rewards
+
+on:
+    # GitHub cron uses UTC. 01:00 UTC is 09:00 in China (UTC+8).
+    schedule:
+        - cron: '0 1 * * *'
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+concurrency:
+    group: daily-microsoft-rewards
+    cancel-in-progress: false
+
+env:
+    TZ: Asia/Shanghai
+    PLAYWRIGHT_BROWSERS_PATH: 0
+    NODE_OPTIONS: --disable-warning=ExperimentalWarning
+
+jobs:
+    collect-daily-points:
+        name: Collect daily Microsoft Rewards points
+        runs-on: ubuntu-latest
+        timeout-minutes: 120
+        env:
+            ACCOUNT_1_EMAIL: ${{ secrets.ACCOUNT_1_EMAIL }}
+            ACCOUNT_1_PASSWORD: ${{ secrets.ACCOUNT_1_PASSWORD }}
+            ACCOUNT_1_TOTP_SECRET: ${{ secrets.ACCOUNT_1_TOTP_SECRET }}
+            ACCOUNT_1_RECOVERY_EMAIL: ${{ secrets.ACCOUNT_1_RECOVERY_EMAIL }}
+            ACCOUNT_1_GEO_LOCALE: ${{ vars.ACCOUNT_1_GEO_LOCALE }}
+            ACCOUNT_1_LANG_CODE: ${{ vars.ACCOUNT_1_LANG_CODE }}
+
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@v4
+
+            - name: Set up Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 24
+                  cache: npm
+
+            - name: Validate account configuration
+              shell: bash
+              run: |
+                  if [[ -z "${ACCOUNT_1_EMAIL:-}" ]]; then
+                    echo "::error::Set the ACCOUNT_1_EMAIL repository secret before running this workflow."
+                    exit 1
+                  fi
+
+            - name: Install dependencies
+              run: npm ci --ignore-scripts
+
+            - name: Build script
+              run: npm run build
+
+            - name: Install headless Chromium
+              run: npx patchright install --with-deps --only-shell chromium
+
+            - name: Prepare headless configuration
+              shell: bash
+              run: |
+                  cp config.example.json config.json
+                  node dist/util/ConfigEnvOverrides.js apply --config config.json
+
+            - name: Run daily Microsoft Rewards tasks
+              id: rewards
+              env:
+                  REWARDS_LOG_FILE: rewards-run.log
+              run: node scripts/github/run-with-logging.js
+
+            - name: Send Enterprise WeChat notification
+              if: always()
+              env:
+                  WECOM_WEBHOOK_URL: ${{ secrets.WECOM_WEBHOOK_URL }}
+                  REWARDS_OUTCOME: ${{ steps.rewards.outcome || 'failure' }}
+                  REWARDS_LOG_FILE: rewards-run.log
+              run: node scripts/github/notify-wecom.js

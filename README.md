@@ -19,6 +19,7 @@
 - [Account Setup](#account-setup)
 - [Config Setup](#config-setup)
     - [Build and run the script (bare metal version)](#build-and-run-the-script-bare-metal-version)
+- [GitHub Actions](#github-actions)
 - [Docker](#docker)
 - [Control API and Dashboard](#control-api-and-dashboard)
 - [Nix Setup](#nix-setup)
@@ -96,6 +97,24 @@ npm run pre-build
 npm run build
 npm run start
 ```
+
+## GitHub Actions
+
+The included [`daily-rewards.yml`](.github/workflows/daily-rewards.yml) workflow runs all enabled Rewards tasks every day at **09:00 China Standard Time (01:00 UTC)**. You can also start it manually with **Run workflow**.
+
+1. Fork this repository, or push your copy to your own GitHub repository. Keep the workflow on the repository's default branch.
+2. Open **Settings → Secrets and variables → Actions → Secrets** and add:
+    - `ACCOUNT_1_EMAIL` (required): Microsoft account email.
+    - `ACCOUNT_1_PASSWORD`: Microsoft account password, if password sign-in is enabled.
+    - `ACCOUNT_1_TOTP_SECRET`: TOTP secret for unattended two-factor authentication.
+    - `ACCOUNT_1_RECOVERY_EMAIL` (optional): recovery email used during sign-in.
+    - `WECOM_WEBHOOK_URL` (optional): Enterprise WeChat group robot webhook URL for success and failure notifications.
+3. Optionally, open the **Variables** tab and set `ACCOUNT_1_GEO_LOCALE` (for example, `CN`) and `ACCOUNT_1_LANG_CODE` (for example, `zh-CN`). Empty values use the script defaults.
+4. Open **Actions**, enable workflows if prompted, select **Daily Microsoft Rewards**, and click **Run workflow** to test the setup.
+
+The workflow validates that an email is configured, installs Node.js 24 and headless Chromium, generates `config.json`, and runs the script with live output. Each run adds a result summary to the Actions page; failures include an extracted error summary. Account emails, usernames, passwords, TOTP secrets, and proxy credentials are redacted from the captured output because logs in public repositories can be publicly accessible. If `WECOM_WEBHOOK_URL` is configured, the workflow sends either a success or failure notification to the Enterprise WeChat group robot; if it is absent, notification is skipped without stopping the Rewards run.
+
+Credentials are read from GitHub Secrets and are not committed to the repository. Scheduled runs may start later than the configured time when GitHub-hosted runners are busy. Fully unattended execution also depends on Microsoft not requesting a CAPTCHA or another interactive sign-in challenge.
 
 ## Docker
 
