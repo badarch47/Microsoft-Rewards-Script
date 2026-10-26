@@ -54,6 +54,7 @@ export class Login {
     private readonly capturedUnknownUrls = new Set<string>()
     private signInMethodsLogged = false
     private passwordlessMethodSelected = false
+    private unknownStateCount = 0
 
     private readonly selectors = {
         primaryButton: 'button[data-testid="primaryButton"]',
@@ -96,6 +97,7 @@ export class Login {
             this.capturedUnknownUrls.clear()
             this.signInMethodsLogged = false
             this.passwordlessMethodSelected = false
+            this.unknownStateCount = 0
             this.bot.logger.info(this.bot.isMobile, 'LOGIN', 'Starting login process')
 
             await page
@@ -327,6 +329,25 @@ export class Login {
             .waitForSelector(selector, { state: 'visible', timeout: 5000 })
             .then(() => true)
             .catch(() => false)
+    }
+
+    /**
+     * Summarises an unrecognised page so the log alone is enough to identify it
+     * (title + visible action labels) without downloading a diagnostics dump.
+     */
+    private async describePageActions(page: Page): Promise<string> {
+        const title = await page.title().catch(() => '')
+        const rawTexts = await page
+            .locator('button, a, [role="button"], [data-testid="tile"]')
+            .allInnerTexts()
+            .catch(() => [] as string[])
+
+        const actions = rawTexts
+            .map(text => text.replace(/\s+/g, ' ').trim())
+            .filter(text => text.length > 0 && text.length <= 80)
+            .slice(0, 10)
+
+        return `title="${title}" actions=[${actions.join(' | ')}]`
     }
 
     private normalizeSignInText(value: string): string {
@@ -841,14 +862,17 @@ export class Login {
                 return true
             }
 
-            // Unknown page - keep diagnostics useful instead of guessing a sign-in action
+            // Unknown page - report what is on it, then fail fast instead of looping until timeout
             case 'UNKNOWN': {
                 const rawUrl = page.url()
                 const url = new URL(rawUrl)
+                this.unknownStateCount++
+                const pageSummary = await this.describePageActions(page)
+
                 this.bot.logger.warn(
                     this.bot.isMobile,
                     'LOGIN',
-                    `Unknown state at ${url.hostname}${url.pathname}, waiting`
+                    `Unknown state at ${url.hostname}${url.pathname} (${this.unknownStateCount}/4) | ${pageSummary}`
                 )
 
                 if (this.bot.config.errorDiagnostics && !this.capturedUnknownUrls.has(rawUrl)) {
@@ -856,6 +880,14 @@ export class Login {
                     await unknownPageDiagnostic(page, {
                         platform: this.bot.isMobile ? 'mobile' : 'desktop'
                     })
+                }
+
+                if (this.unknownStateCount >= 4) {
+                    throw new Error(
+                        `Unsupported login page ${url.hostname}${url.pathname} | ${pageSummary}. ` +
+                            'This page needs an interactive check (for example an emailed or texted code); ' +
+                            'reuse a saved login session instead of signing in from a new IP.'
+                    )
                 }
                 return true
             }
