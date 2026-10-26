@@ -34,6 +34,10 @@ jobs:
             ACCOUNT_1_RECOVERY_EMAIL: ${{ secrets.ACCOUNT_1_RECOVERY_EMAIL }}
             ACCOUNT_1_GEO_LOCALE: ${{ vars.ACCOUNT_1_GEO_LOCALE }}
             ACCOUNT_1_LANG_CODE: ${{ vars.ACCOUNT_1_LANG_CODE }}
+            # Reuse the fingerprint captured during the manual login, otherwise every
+            # run presents the saved cookies together with a brand-new user agent.
+            ACCOUNT_1_SAVE_FINGERPRINT_MOBILE: ${{ vars.ACCOUNT_1_SAVE_FINGERPRINT_MOBILE }}
+            ACCOUNT_1_SAVE_FINGERPRINT_DESKTOP: ${{ vars.ACCOUNT_1_SAVE_FINGERPRINT_DESKTOP }}
 
         steps:
             - name: Check out repository
@@ -113,8 +117,15 @@ jobs:
                     exit 0
                   fi
                   mkdir -p sessions
-                  printf '%s' "$REWARDS_SESSION_DB_B64" | base64 -d > sessions/sessions.db
-                  echo "Login session restored from the REWARDS_SESSION_DB_B64 secret."
+                  printf '%s' "$REWARDS_SESSION_DB_B64" | base64 -d > /tmp/rewards-session.bin
+                  if gzip -t /tmp/rewards-session.bin 2>/dev/null; then
+                    gunzip -c /tmp/rewards-session.bin > sessions/sessions.db
+                    echo "Login session restored from the REWARDS_SESSION_DB_B64 secret (gzip)."
+                  else
+                    cp /tmp/rewards-session.bin sessions/sessions.db
+                    echo "Login session restored from the REWARDS_SESSION_DB_B64 secret (uncompressed)."
+                  fi
+                  rm -f /tmp/rewards-session.bin
 
             - name: Run daily Microsoft Rewards tasks
               id: rewards
