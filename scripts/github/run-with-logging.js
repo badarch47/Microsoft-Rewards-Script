@@ -17,6 +17,31 @@ const sensitiveValues = Object.entries(process.env)
 let sanitizedLog = ''
 let finished = false
 
+// The upstream script logs account-level failures but still exits with code 0.
+// Detect those records so the Actions job reflects the real outcome.
+const failurePatterns = [/\[FLOW\]\s+(?:Mobile|Desktop) flow failed/i, /\[ACCOUNT-SKIP\]/, /Fatal error/]
+
+function findFailureLines(text) {
+    return text.split(/\r?\n/).filter(line => failurePatterns.some(pattern => pattern.test(line)))
+}
+
+function extractRunStats(text) {
+    const line = [...text.split(/\r?\n/)].reverse().find(entry => entry.includes('[RUN-END]'))
+    if (!line) return ''
+    const accounts = line.match(/accountsProcessed=(\d+)/)
+    const points = line.match(/pointsGained=(-?\d+)/)
+    const balance = line.match(/currentBalance=(-?\d+)/)
+    if (!accounts && !points && !balance) return ''
+
+    return [
+        accounts ? `处理账号：${accounts[1]} 个` : '',
+        points ? `本次获得积分：${points[1]}` : '',
+        balance ? `当前积分：${balance[1]}` : ''
+    ]
+        .filter(Boolean)
+        .join(' | ')
+}
+
 function redact(text) {
     let output = text.replace(/\u001b\[[0-9;]*m/g, '')
     for (const value of sensitiveValues) output = output.split(value).join('[redacted]')
@@ -47,10 +72,11 @@ function createLineWriter(stream) {
     }
 }
 
-function writeRunSummary(exitCode) {
+function writeRunSummary(exitCode, forcedFailure) {
     if (!process.env.GITHUB_STEP_SUMMARY) return
 
     const success = exitCode === 0
+    const runStats = extractRunStats(sanitizedLog)
     const lines = sanitizedLog.trim().split(/\r?\n/).filter(Boolean)
     const errorLines = lines.filter(line => /\[ERROR\]|\b(?:error|failed|failure|exception)\b/i.test(line))
     const recentLines = lines.slice(success ? -12 : -30)
@@ -61,9 +87,11 @@ function writeRunSummary(exitCode) {
         '## Microsoft Rewards 运行结果',
         '',
         `- 状态：**${success ? '成功' : '失败'}**`,
+        runStats ? `- ${runStats}` : '',
         `- 完成时间（北京时间）：${completedAt}`,
+        forcedFailure ? '- 说明：脚本自身返回 0，但输出中存在账号流程失败记录，本次运行已判定为失败。' : '',
         `- [查看完整运行日志](${runUrl})`
-    ]
+    ].filter(Boolean)
 
     if (!success && errorLines.length) {
         sections.push('', '### 错误摘要', codeBlock(errorLines.slice(-10).join('\n').slice(-4000)))
@@ -93,13 +121,24 @@ function finish(exitCode, signal) {
     stdoutWriter.flush()
     stderrWriter.flush()
 
-    const resultCode = signal ? 1 : exitCode
+    const rawCode = signal ? 1 : exitCode
     const suffix = signal ? ` (signal ${signal})` : ''
-    emit(`[Actions] Microsoft Rewards process exited with code ${resultCode}${suffix}.\n`)
-    if (resultCode !== 0)
-        emit(`::error::Microsoft Rewards failed with exit code ${resultCode}${suffix}.\n`, process.stderr)
+    emit(`[Actions] Microsoft Rewards process exited with code ${rawCode}${suffix}.\n`)
 
-    writeRunSummary(resultCode)
+    const failureLines = findFailureLines(sanitizedLog)
+    const forcedFailure = rawCode === 0 && failureLines.length > 0
+    const resultCode = forcedFailure ? 1 : rawCode
+
+    if (forcedFailure) {
+        emit(
+            `[Actions] Detected ${failureLines.length} account flow failure record(s) in the output; marking this job as failed.\n`
+        )
+        emit(`::error::${failureLines[0].slice(0, 300)}\n`, process.stderr)
+    } else if (resultCode !== 0) {
+        emit(`::error::Microsoft Rewards failed with exit code ${resultCode}${suffix}.\n`, process.stderr)
+    }
+
+    writeRunSummary(resultCode, forcedFailure)
     process.exitCode = resultCode
 }
 
