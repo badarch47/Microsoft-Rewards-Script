@@ -15,7 +15,9 @@ concurrency:
 
 env:
     TZ: Asia/Shanghai
-    PLAYWRIGHT_BROWSERS_PATH: 0
+    # Keep browsers in a stable cacheable directory instead of node_modules,
+    # so `npm ci` never wipes them and actions/cache can reuse them.
+    PLAYWRIGHT_BROWSERS_PATH: /home/runner/.cache/patchright
     NODE_OPTIONS: --disable-warning=ExperimentalWarning
 
 jobs:
@@ -55,8 +57,29 @@ jobs:
             - name: Build script
               run: npm run build
 
+            - name: Restore headless Chromium cache
+              id: chromium-cache
+              uses: actions/cache@v4
+              with:
+                  path: /home/runner/.cache/patchright
+                  key: ${{ runner.os }}-patchright-${{ hashFiles('package-lock.json') }}
+
+            # The ubuntu runner image already ships the shared libraries Chromium needs,
+            # so `--with-deps` (a large apt install on every run) is unnecessary here.
             - name: Install headless Chromium
-              run: npx patchright install --with-deps --only-shell chromium
+              if: steps.chromium-cache.outputs.cache-hit != 'true'
+              timeout-minutes: 8
+              run: npx patchright install --only-shell chromium
+
+            - name: Verify headless Chromium
+              timeout-minutes: 3
+              run: |
+                  node --input-type=module -e "
+                    import { chromium } from 'patchright';
+                    const browser = await chromium.launch({ headless: true });
+                    console.log('Chromium launch OK:', browser.version());
+                    await browser.close();
+                  "
 
             - name: Prepare headless configuration
               shell: bash
